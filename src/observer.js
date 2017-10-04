@@ -181,169 +181,173 @@ goog.scope(function () {
    * @param {number=} timeout Optional timeout for giving up on font load detection and rejecting the promise (defaults to 3 seconds).
    * @return {Promise.<fontface.Observer>}
    */
-  Observer.prototype.load = function (text, timeout) {
+  Observer.prototype.load = function (text, timeout, success, fail) {
     var that = this;
     var testString = text || 'BESbswy';
     var timeoutId = 0;
     var timeoutValue = timeout || Observer.DEFAULT_TIMEOUT;
     var start = that.getTime();
 
-    return new Promise(function (resolve, reject) {
-      if (Observer.supportsNativeFontLoading() && !Observer.hasSafari10Bug()) {
-        var loader = new Promise(function (resolve, reject) {
-          var check = function () {
-            var now = that.getTime();
 
-            if (now - start >= timeoutValue) {
+    // Any browser supporting native font loading supports promises.
+    if (Observer.supportsNativeFontLoading() && !Observer.hasSafari10Bug()) {
+      var loader = new Promise(function (resolve, reject) {
+        var check = function () {
+          var now = that.getTime();
+
+          if (now - start >= timeoutValue) {
+            reject();
+          } else {
+            document.fonts.load(that.getStyle('"' + that['family'] + '"'), testString).then(function (fonts) {
+              if (fonts.length >= 1) {
+                resolve();
+              } else {
+                setTimeout(check, 25);
+              }
+            }, function () {
               reject();
-            } else {
-              document.fonts.load(that.getStyle('"' + that['family'] + '"'), testString).then(function (fonts) {
-                if (fonts.length >= 1) {
-                  resolve();
-                } else {
-                  setTimeout(check, 25);
+            });
+          }
+        };
+        check();
+      });
+
+      var timer = new Promise(function (resolve, reject) {
+        timeoutId = setTimeout(reject, timeoutValue);
+      });
+
+      Promise.race([timer, loader]).then(function () {
+        clearTimeout(timeoutId);
+        success(that);
+      }, function () {
+        fail(that);
+      });
+    } else {
+      dom.waitForBody(function () {
+        var rulerA = new Ruler(testString);
+        var rulerB = new Ruler(testString);
+        var rulerC = new Ruler(testString);
+
+        var widthA = -1;
+        var widthB = -1;
+        var widthC = -1;
+
+        var fallbackWidthA = -1;
+        var fallbackWidthB = -1;
+        var fallbackWidthC = -1;
+
+        var container = dom.createElement('div');
+
+        /**
+         * @private
+         */
+        function removeContainer() {
+          if (container.parentNode !== null) {
+            dom.remove(container.parentNode, container);
+          }
+        }
+
+        /**
+         * @private
+         *
+         * If metric compatible fonts are detected, one of the widths will be -1. This is
+         * because a metric compatible font won't trigger a scroll event. We work around
+         * this by considering a font loaded if at least two of the widths are the same.
+         * Because we have three widths, this still prevents false positives.
+         *
+         * Cases:
+         * 1) Font loads: both a, b and c are called and have the same value.
+         * 2) Font fails to load: resize callback is never called and timeout happens.
+         * 3) WebKit bug: both a, b and c are called and have the same value, but the
+         *    values are equal to one of the last resort fonts, we ignore this and
+         *    continue waiting until we get new values (or a timeout).
+         */
+        var resolved = false;
+        function check() {
+          if ((widthA != -1 && widthB != -1) || (widthA != -1 && widthC != -1) || (widthB != -1 && widthC != -1)) {
+            if (widthA == widthB || widthA == widthC || widthB == widthC) {
+              // All values are the same, so the browser has most likely loaded the web font
+
+              if (Observer.hasWebKitFallbackBug()) {
+                // Except if the browser has the WebKit fallback bug, in which case we check to see if all
+                // values are set to one of the last resort fonts.
+
+                if (((widthA == fallbackWidthA && widthB == fallbackWidthA && widthC == fallbackWidthA) ||
+                      (widthA == fallbackWidthB && widthB == fallbackWidthB && widthC == fallbackWidthB) ||
+                      (widthA == fallbackWidthC && widthB == fallbackWidthC && widthC == fallbackWidthC))) {
+                  // The width we got matches some of the known last resort fonts, so let's assume we're dealing with the last resort font.
+                  return;
                 }
-              }, function () {
-                reject();
-              });
+              }
+              removeContainer();
+              clearTimeout(timeoutId);
+              if (!resolved) {
+                success(that);
+                resolved = true;
+              }
             }
-          };
+          }
+        }
+
+        // This ensures the scroll direction is correct.
+        container.dir = 'ltr';
+
+        rulerA.setFont(that.getStyle('sans-serif'));
+        rulerB.setFont(that.getStyle('serif'));
+        rulerC.setFont(that.getStyle('monospace'));
+
+        dom.append(container, rulerA.getElement());
+        dom.append(container, rulerB.getElement());
+        dom.append(container, rulerC.getElement());
+
+        dom.append(document.body, container);
+
+        fallbackWidthA = rulerA.getWidth();
+        fallbackWidthB = rulerB.getWidth();
+        fallbackWidthC = rulerC.getWidth();
+
+        function checkForTimeout() {
+          var now = that.getTime();
+
+          if (now - start >= timeoutValue) {
+            removeContainer();
+            fail(that);
+          } else {
+            var hidden = document['hidden'];
+            if (hidden === true || hidden === undefined) {
+              widthA = rulerA.getWidth();
+              widthB = rulerB.getWidth();
+              widthC = rulerC.getWidth();
+              check();
+            }
+            timeoutId = setTimeout(checkForTimeout, 50);
+          }
+        }
+
+        checkForTimeout();
+
+
+        rulerA.onResize(function (width) {
+          widthA = width;
           check();
         });
 
-        var timer = new Promise(function (resolve, reject) {
-          timeoutId = setTimeout(reject, timeoutValue);
+        rulerA.setFont(that.getStyle('"' + that['family'] + '",sans-serif'));
+
+        rulerB.onResize(function (width) {
+          widthB = width;
+          check();
         });
 
-        Promise.race([timer, loader]).then(function () {
-          clearTimeout(timeoutId);
-          resolve(that);
-        }, function () {
-          reject(that);
+        rulerB.setFont(that.getStyle('"' + that['family'] + '",serif'));
+
+        rulerC.onResize(function (width) {
+          widthC = width;
+          check();
         });
-      } else {
-        dom.waitForBody(function () {
-          var rulerA = new Ruler(testString);
-          var rulerB = new Ruler(testString);
-          var rulerC = new Ruler(testString);
 
-          var widthA = -1;
-          var widthB = -1;
-          var widthC = -1;
-
-          var fallbackWidthA = -1;
-          var fallbackWidthB = -1;
-          var fallbackWidthC = -1;
-
-          var container = dom.createElement('div');
-
-          /**
-           * @private
-           */
-          function removeContainer() {
-            if (container.parentNode !== null) {
-              dom.remove(container.parentNode, container);
-            }
-          }
-
-          /**
-           * @private
-           *
-           * If metric compatible fonts are detected, one of the widths will be -1. This is
-           * because a metric compatible font won't trigger a scroll event. We work around
-           * this by considering a font loaded if at least two of the widths are the same.
-           * Because we have three widths, this still prevents false positives.
-           *
-           * Cases:
-           * 1) Font loads: both a, b and c are called and have the same value.
-           * 2) Font fails to load: resize callback is never called and timeout happens.
-           * 3) WebKit bug: both a, b and c are called and have the same value, but the
-           *    values are equal to one of the last resort fonts, we ignore this and
-           *    continue waiting until we get new values (or a timeout).
-           */
-          function check() {
-            if ((widthA != -1 && widthB != -1) || (widthA != -1 && widthC != -1) || (widthB != -1 && widthC != -1)) {
-              if (widthA == widthB || widthA == widthC || widthB == widthC) {
-                // All values are the same, so the browser has most likely loaded the web font
-
-                if (Observer.hasWebKitFallbackBug()) {
-                  // Except if the browser has the WebKit fallback bug, in which case we check to see if all
-                  // values are set to one of the last resort fonts.
-
-                  if (((widthA == fallbackWidthA && widthB == fallbackWidthA && widthC == fallbackWidthA) ||
-                        (widthA == fallbackWidthB && widthB == fallbackWidthB && widthC == fallbackWidthB) ||
-                        (widthA == fallbackWidthC && widthB == fallbackWidthC && widthC == fallbackWidthC))) {
-                    // The width we got matches some of the known last resort fonts, so let's assume we're dealing with the last resort font.
-                    return;
-                  }
-                }
-                removeContainer();
-                clearTimeout(timeoutId);
-                resolve(that);
-              }
-            }
-          }
-
-          // This ensures the scroll direction is correct.
-          container.dir = 'ltr';
-
-          rulerA.setFont(that.getStyle('sans-serif'));
-          rulerB.setFont(that.getStyle('serif'));
-          rulerC.setFont(that.getStyle('monospace'));
-
-          dom.append(container, rulerA.getElement());
-          dom.append(container, rulerB.getElement());
-          dom.append(container, rulerC.getElement());
-
-          dom.append(document.body, container);
-
-          fallbackWidthA = rulerA.getWidth();
-          fallbackWidthB = rulerB.getWidth();
-          fallbackWidthC = rulerC.getWidth();
-
-          function checkForTimeout() {
-            var now = that.getTime();
-
-            if (now - start >= timeoutValue) {
-              removeContainer();
-              reject(that);
-            } else {
-              var hidden = document['hidden'];
-              if (hidden === true || hidden === undefined) {
-                widthA = rulerA.getWidth();
-                widthB = rulerB.getWidth();
-                widthC = rulerC.getWidth();
-                check();
-              }
-              timeoutId = setTimeout(checkForTimeout, 50);
-            }
-          }
-
-          checkForTimeout();
-
-
-          rulerA.onResize(function (width) {
-            widthA = width;
-            check();
-          });
-
-          rulerA.setFont(that.getStyle('"' + that['family'] + '",sans-serif'));
-
-          rulerB.onResize(function (width) {
-            widthB = width;
-            check();
-          });
-
-          rulerB.setFont(that.getStyle('"' + that['family'] + '",serif'));
-
-          rulerC.onResize(function (width) {
-            widthC = width;
-            check();
-          });
-
-          rulerC.setFont(that.getStyle('"' + that['family'] + '",monospace'));
-        });
-      }
-    });
+        rulerC.setFont(that.getStyle('"' + that['family'] + '",monospace'));
+      });
+    }
   };
 });
